@@ -1,0 +1,64 @@
+.\" Monitorix manpage.
+.\" Copyright (C) 2005-2021 by Jordi Sanfeliu <jordi@fibranet.cat>
+.\"
+.\" This is the man page for the monitorix collector daemon.
+.\"
+.TH monitorix 8 "Jan 2021" 3.13.1 "Monitorix collector daemon"
+.SH NAME
+monitorix - a lightweight system monitoring tool
+.SH SYNOPSIS
+\fBmonitorix\fR \fB-c\fR configfile [\fB-p\fR pidfile] [\fB-d\fR none | graph[,graph] | all] [\fB-v\fR] [\fB-n\fR]
+.SH DESCRIPTION
+This Perl daemon starts the main Monitorix process, which gathers statistics about the system it is running on and stores this information in a set of RRD files.
+.SH OPTIONS
+.TP
+\fB\-c\fR \fIconfigfile\fR
+The default location of the main configuration file varies depending on the operating system:
+.P
+.RS
+Linux:        \fI/etc/monitorix/monitorix.conf\fP
+.br
+FreeBSD:      \fI/usr/local/etc/monitorix.conf\fP
+.P
+Extra configuration files can be placed in \fI/etc/monitorix/conf.d\fP, they will be loaded right after the main configuration file (overriding previous options).
+.RE
+.TP
+\fB\-p\fR \fIpidfile\fR
+Stores the daemon's process ID into the specified file.
+.TP
+\fB\-d\fR none | graph[,graph] | all
+Logs more information about what \fBmonitorix\fP is doing internally. The keys reflect if the data collected must be displayed on each case. If \fBall\fP is defined, the data collected of all enabled graphs will be shown. If \fBnone\fP is defined no data collected will be shown. Finally it is also possible to define a comma-separated list of graph names from which show their data collected.
+.br
+For a reference of all graph names check the option \fBgraph_name\fP in the \fImonitorix.conf\fP configuration file.
+.TP
+\fB\-v\fR
+Displays version information.
+.TP
+\fB\-n\fR
+This argument will prevent Monitorix from daemonizing, and hence, forcing it to run in foreground. This is specially useful for debugging purposes.
+.TP
+\fB\-u\fR
+This option will force Monitorix to run under the regular user who started it. It's necessary to make sure that this user will have write permissions to the directory and files pointed by the options \fBbase_dir\fP, \fBbase_lib\fP and \fBlog_file\fP (either for \fImonitorix\fP and for the HTTP built-in server). Also, you must know that some graphs might not work because only the 'root' user is capable to get such statistics. Check the log files after starting Monitorix in this mode.
+.SH SIGNALS
+On receipt of a SIGHUP, \fBmonitorix\fP will close and reopen its log file (provided that it has a filename defined). This is useful in scripts which rotate and age log files.
+.P
+Note that the configuration file is not re-read.
+.SH FILES
+The following set of the files are created on every startup:
+.TP 8
+\fB<base_dir>/cgi/monitorix.conf.path\fP
+Stores the path of \fIconfigfile\fP.
+.TP 8
+\fB<base_dir>/cgi/monitorix.hplog\fP
+Stores the output of \fIhplog\fP command.
+.TP 8
+\fB<base_dir>/index.html\fP
+HTML main page.
+.SH AUTHOR
+Monitorix is written by Jordi Sanfeliu <jordi@fibranet.cat>
+.SH COPYRIGHT
+Copyright \(co 2005-2021 Jordi Sanfeliu
+.br
+Licensed under the GNU General Public License version 2 (GPLv2).
+.SH "SEE ALSO"
+.BR monitorix.conf (5)

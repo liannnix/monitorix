@@ -1,0 +1,896 @@
+#!/usr/bin/env perl
+#
+# Monitorix - A lightweight system monitoring tool.
+#
+# Copyright (C) 2005-2021 by Jordi Sanfeliu <jordi@fibranet.cat>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+
+require 5.006;
+
+use strict;
+use warnings;
+use FindBin qw($Bin);
+use lib $Bin . "/lib", "/usr/lib/monitorix";
+
+use Monitorix;
+use POSIX qw(WNOHANG LC_TIME setlocale uname pause setsid);
+use Config::General;
+use Getopt::Std;
+use Cwd qw(abs_path);
+
+# Force a standard locale
+$ENV{LANG} = "";
+setlocale(LC_TIME, "C");
+
+$SIG{'INT' } = 'INT_handler';
+$SIG{'ABRT'} = 'INT_handler';
+$SIG{'QUIT'} = 'INT_handler';
+$SIG{'TRAP'} = 'INT_handler';
+$SIG{'STOP'} = 'INT_handler';
+$SIG{'TERM'} = 'INT_handler';
+$SIG{'HUP' } = 'HUP_handler';
+
+use constant VERSION	=> "3.13.1";
+use constant RELDATE	=> "27-Jan-2021";
+
+my @suppsys = ("Linux", "FreeBSD", "OpenBSD", "NetBSD");
+our %config;
+our %options;
+
+sub INT_handler {
+	my ($signal) = @_;
+
+	logger("SIG$signal caught.");
+	flush_accounting_rules(\%config, $options{d}) unless $options{u};
+	if(lc($config{httpd_builtin}->{enabled} || "") eq "y") {
+		kill(15, $config{httpd_pid});
+	}
+	logger("Exiting.");
+	exit(0);
+}
+
+sub HUP_handler {
+	my ($signal) = @_;
+	my $myself = (caller(0))[3];
+
+	return if $options{n};	# only continue if it's a daemon
+
+	my (undef, undef, $uid) = getpwnam($config{httpd_builtin}->{user});
+	my (undef, undef, $gid) = getgrnam($config{httpd_builtin}->{group});
+
+	logger("SIG$signal caught.");
+
+	# upon receiving SIGHUP a new logfile is opened
+	if($config{log_file}) {
+		close(STDOUT);
+		close(STDERR);
+		open(STDOUT, ">> $config{log_file}") || logger("Can't write to LOG: $!");
+		open(STDERR, ">> $config{log_file}") || logger("Can't write to LOG: $!");
+		chmod(0600, $config{log_file});
+		logger("$myself: opening a new log file.");
+	}
+
+	# restart HTTP built-in
+	if(lc($config{httpd_builtin}->{enabled} || "") eq "y") {
+		if(defined($config{httpd_pid})) {
+			require HTTPServer;
+			kill(15, $config{httpd_pid});
+			kill(9, $config{httpd_pid});
+			httpd_setup(\%config, $options{u});
+			logger("Restarted HTTP built-in server (pid $config{httpd_pid}).") if (defined($config{httpd_pid}));
+		}
+	}
+}
+
+sub daemonize {
+	if($config{log_file}) {
+		open(STDIN, "< /dev/null") || die "Can't read /dev/null: $!";
+		open(STDOUT, ">> $config{log_file}") || die "Can't write to LOG: $!";
+	}
+	umask(022) || die "Unable to umask 022: $!";
+	exit if fork();	# parent exits
+	(setsid() != -1) || die "Can't start a new session: $!";
+
+	if($config{log_file}) {
+		open(STDERR, ">> $config{log_file}") || die "Can't write to LOG: $!";
+	}
+}
+
+sub usage {
+	print(STDERR << "EOF");
+Usage: monitorix -c configfile [-p pidfile] [-d none | graph[,graph] | all ] [-v] [-n]
+
+EOF
+	exit(1);
+}
+
+sub create_index {
+	my $myself = (caller(0))[3];
+
+	my $n;
+	my $gname;
+	my $piwik_code = "";
+	my ($piwik_url, $piwik_sid, $piwik_img);
+	my $text_when_all;
+	my $value_when_all;
+	my $when_all_code = "";
+
+	# keep backwards compatibility for v3.2.1 and less
+	if(ref($config{theme}) ne "HASH") {
+		logger("$myself: WARNING: the <theme> option is not valid. Please consider upgrading your configuration file. Defaulting to white theme.");
+		delete($config{theme});
+		$config{theme}->{white}->{main_bg} = "FFFFFF";
+		$config{theme}->{white}->{main_fg} = "000000";
+		$config{theme}->{white}->{title_bg} = "777777";
+		$config{theme}->{white}->{title_fg} = "CCCC00";
+		$config{theme}->{white}->{graph_bg} = "CCCCCC";
+		$config{theme_color} = "white";
+	}
+
+	my $theme = $config{theme_color} || "white";
+	if(!$config{theme}->{$theme}) {
+		logger("$myself: ERROR: invalid value in 'theme_color' option. Defaulting to white theme.");
+		$theme = $config{theme_color} = "white";
+	}
+
+	# Default option in 'Graph' list when 'All' is selected in 'Hostname' list.
+	#
+	# The following small JavaScript function is intended to avoid to select to view
+	# accidentally (unless explicitly selected by the user) a huge amount of remote
+	# images that will hang the browser for a while.
+	$text_when_all = $config{multihost}->{default_option_when_all} || "";
+	$text_when_all = "System load" if !$text_when_all;
+	my @match = grep { $config{graphs}{$_} eq $text_when_all } keys %{$config{graphs}};
+	$value_when_all = $match[0] || "";
+	if(!$value_when_all) {
+		logger("$myself: ERROR: invalid value in 'default_option_when_all' option ('$text_when_all').");
+		$value_when_all = "_system1";
+	}
+	$when_all_code = <<"EOF";
+<!-- Default option code when 'All' is selected in 'Hostname' list -->
+<script type="text/javascript">
+   function auto_select() {
+      var host = document.getElementById("hostname");
+      var h = host.options[host.selectedIndex].text;
+      var graph = document.getElementById("graph");
+      var g = graph.options[graph.selectedIndex].text;
+      if(h == "All" && g == "All graphs") {
+         document.getElementById("graph").value = "$value_when_all";
+      }
+      return true;
+   }
+</script>
+<!-- End Default option code when 'All' is selected in 'Hostname' list -->
+EOF
+
+	# Piwik tracking code
+	if(lc($config{piwik_tracking}->{enabled} || "") eq "y") {
+		$piwik_url = $config{piwik_tracking}->{url} || "";
+		$piwik_sid = $config{piwik_tracking}->{sid} || "";
+		$piwik_img = $config{piwik_tracking}->{img} || "";
+		$piwik_code = <<"EOF";
+
+<!-- Piwik -->
+ <script type="text/javascript">
+    var _paq = _paq || [];
+    _paq.push(['trackPageView']);
+    _paq.push(['enableLinkTracking']);
+    (function() {
+      var u=(("https:" == document.location.protocol) ? "https" : "http") + "$piwik_url";
+      _paq.push(['setTrackerUrl', u+'piwik.php']);
+      _paq.push(['setSiteId', $piwik_sid]);
+      var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0]; g.type='text/javascript';
+      g.defer=true; g.async=true; g.src=u+'piwik.js';
+      s.parentNode.insertBefore(g,s);
+    })();
+ </script>
+ <noscript>
+   <p><img src="$piwik_img" style="border:0;" alt=""/></p>
+ </noscript>
+<!-- End Piwik Code -->
+EOF
+	}
+
+	# force to only one trailing slash
+	(my $base_url = $config{base_url}) =~ s/\/*$/\//;
+	(my $base_cgi = $config{base_cgi}) =~ s/\/*$/\//;
+
+	if(!open(OUT, "> $config{base_dir}/index.html")) {
+		die "unable to create '${config{base_dir}}index.html': $!";
+	}
+	my $css = sprintf("%scss/%s.css", $base_url, $theme);
+	print(OUT <<EOF);
+<!DOCTYPE html "-//W3C//DTD HTML 4.01 Final//EN">
+<html>
+ <head>
+  <title>$config{title}</title>
+  <link rel="shortcut icon" href="$base_url$config{favicon}">
+  <link href="$css" rel="stylesheet">
+ </head>
+ <body class="index-body">
+  $piwik_code
+  $when_all_code
+  <center>
+  <p>
+  <br>
+  <table class='startpage-header-table'>
+    <tr>
+      <td class='startpage-header-table'>
+        <a href="$config{logo_top_url}"><img src="$base_url$config{logo_top}" border="0"></a>
+      </td>
+    </tr>
+    <tr>
+      <td class='startpage-header-table'>
+        <h2 align="right">v@{[VERSION]}</h2>
+      </td>
+    </tr>
+  </table>
+  <p>
+  <form action="${base_cgi}monitorix.cgi" method="get">
+    <table>
+      <tr>
+        <td class='td-title'>
+          <b>&nbsp;Hostname&nbsp;</b>
+        </td>
+        <td class='td-title'>
+          <b>&nbsp;Graph&nbsp;</b>
+        </td>
+      </tr>
+      <tr>
+EOF
+
+	print(OUT "        <td>\n");
+	print(OUT "          <select name='mode' size='1' id='hostname' onchange='auto_select()'>\n");
+	print(OUT "            <optgroup label='Local Host'>\n");
+	print(OUT "            <option value='localhost'>localhost</option>\n");
+	print(OUT "            </optgroup>\n");
+
+	if(scalar(my @remotehost_list = split(',', $config{multihost}->{remotehost_list})) && lc($config{multihost}->{enabled} || "") eq "y") {
+		print(OUT "            <optgroup label='Multihost'>\n");
+		print(OUT "            <option value='multihost.all'>All</option>\n");
+		for($n = 0; $n < scalar(@remotehost_list); $n++) {
+			print(OUT "              <option value='multihost.$n'>" . trim($remotehost_list[$n]) . "</option>\n");
+                              }
+		print(OUT "            </optgroup>\n");
+
+		if(lc($config{multihost}->{groups} || "") eq "y" ) {
+			my @remotegroup_list = split(',', $config{multihost}->{remotegroup_list});
+			print(OUT "            <optgroup label='Multihost-Groups'>\n");
+			print(OUT "            <option value='multihost.group'>All Groups</option>\n");
+			for($n = 0; $n < scalar(@remotegroup_list); $n++) {
+				print(OUT "              <option value='multihost.group$n'>" . trim($remotegroup_list[$n]) . "</option>\n");
+			}
+			print(OUT "            </optgroup>\n");
+		}
+	}
+
+	if(scalar(my @tal = split(',', $config{traffacct}->{list})) && lc($config{traffacct}->{enabled} || "") eq "y") {
+		print(OUT "            <optgroup label='Traffic Accounting'>\n");
+		print(OUT "              <option value='traffacct.all'>All</option>\n");
+		for($n = 0; $n < scalar(@tal); $n++) {
+			print(OUT "              <option value='traffacct.$n'>" . trim($tal[$n]) . "</option>\n");
+                              }
+		print(OUT "            </optgroup>\n");
+	}
+	print(OUT "          </select>\n");
+	print(OUT "        </td>\n");
+
+
+
+	print(OUT "        <td>\n");
+	print(OUT "          <select name='graph' size='1' id='graph'>\n");
+	print(OUT "            <option value='all'>All graphs</option>\n");
+	foreach (split(',', $config{graph_name})) {
+		my $g = trim($_);
+		if(lc($config{graph_enable}->{$g} || "") eq "y") {
+			print(OUT "            <optgroup label='" . $config{graph_title}->{$g} . "'>\n");
+			if($g eq "proc") {
+				for($n = 0; $n < $config{proc}->{max}; $n++) {
+					$gname = "_" . $g;
+					print(OUT "              <option value='" . $gname . $n . "'>" . $config{graphs}->{$gname} . " " . $n . "</option>\n");
+				}
+				next;
+			}
+			if($g eq "gensens") {
+				for($n = 0; $n < keys %{$config{gensens}->{list}}; $n++) {
+					my $name = trim($config{gensens}->{title}->{$n});
+					$gname = "_" . $g;
+					print(OUT "              <option value='" . $gname . $n . "'>" . $name . "</option>\n");
+				}
+				next;
+			}
+			if($g eq "ipmi") {
+				for($n = 0; $n < scalar(my @ipmi_list = split(',', $config{ipmi}->{list})); $n++) {
+					my $name = trim($ipmi_list[$n]);
+					$gname = "_" . $g;
+					print(OUT "              <option value='" . $gname . $n . "'>" . $name . "</option>\n");
+				}
+				next;
+			}
+			if($g eq "ambsens") {
+				for($n = 0; $n < scalar(my @ambsens_list = split(',', $config{ambsens}->{list})); $n++) {
+					my $name = trim($ambsens_list[$n]);
+					$gname = "_" . $g;
+					print(OUT "              <option value='" . $gname . $n . "'>" . $name . "</option>\n");
+				}
+				next;
+			}
+			if($g eq "fs" || $g eq "process") {
+				$n = 0;
+				foreach my $k (sort keys %{$config{graphs}}) {
+					if($k =~ m/$g/) {
+						$gname = "_" . $g . ++$n;
+						my $gname2 = "_" . $g . "0" . $n;
+						if($config{graphs}->{$gname}) {
+							print(OUT "              <option value='" . $gname2 ."'>" . $config{graphs}->{$gname} . "</option>\n");
+						}
+					}
+				}
+				next;
+			}
+			if($g eq "du") {
+				for($n = 0; $n < scalar(my @du_list = split(',', $config{du}->{list})); $n++) {
+					my $name = trim($du_list[$n]);
+					$gname = "_" . $g;
+					print(OUT "              <option value='" . $gname . $n . "'>" . $name . "</option>\n");
+				}
+				next;
+			}
+			if($g eq "net") {
+				my $n2;
+				for($n = 0; $n < scalar(my @nl = split(',', $config{net}->{list})); $n++) {
+					$gname = "_" . $g;
+					for($n2 = 1; $n2 <= 3; $n2++) {
+						my $str = trim($nl[$n]) . " " . $config{graphs}->{$gname . $n2};
+						print(OUT "              <option value='" . $gname . $n . $n2 . "'>" . $str . "</option>\n");
+					}
+				}
+				next;
+			}
+			if($g eq "port") {
+				for($n = 0; $n < $config{port}->{max} && $n < scalar(my @port_list = split(',', $config{port}->{list})); $n++) {
+					my $num = trim($port_list[$n]);
+					if(!$config{port}->{desc}->{$num}) {
+						logger("$myself: port number '$num' listed but not defined.");
+						next;
+					}
+					my $name = trim((split(',', $config{port}->{desc}->{$num}))[0]);
+					my $pcon = trim((split(',', $config{port}->{desc}->{$num}))[2]);
+					$gname = "_" . $g;
+					foreach my $c (split('/', $pcon)) {
+						$c = uc(trim($c));
+						print(OUT "              <option value='" . $gname . $n . "'>" . $config{graphs}->{$gname} . " " . $num . " (" . $c . "-" . $name . ")" . "</option>\n");
+					}
+				}
+				next;
+			}
+			if($g eq "fail2ban") {
+				for($n = 0; $n < scalar(my @fail2ban_list = split(',', $config{fail2ban}->{list})); $n++) {
+					my $name = trim($fail2ban_list[$n]);
+					$gname = "_" . $g;
+					print(OUT "              <option value='" . $gname . $n . "'>" . $name . "</option>\n");
+				}
+				next;
+			}
+			$n = 0;
+			foreach my $k (sort keys %{$config{graphs}}) {
+				if($k =~ m/$g/) {
+					$gname = "_" . $g . ++$n;
+					if($config{graphs}->{$gname}) {
+						print(OUT "              <option value='" . $gname ."'>" . $config{graphs}->{$gname} . "</option>\n");
+					}
+				}
+			}
+			print(OUT "            </optgroup>\n");
+		}
+	}
+	print(OUT "          </select>\n");
+	print(OUT "        </td>\n");
+
+
+	print(OUT <<EOF);
+     </tr>
+    </table>
+    <p>
+    <table>
+     <tr>
+EOF
+
+	if(lc($config{enable_hourly_view} || "") eq "y" ) {
+		print(OUT <<EOF);
+        <td class='td-title'>
+       	    <label>
+		<input type="radio" name="when" value="1hour">
+		<b>Hourly&nbsp;</b>
+	    </label>
+        </td>
+EOF
+	}
+
+	print(OUT <<EOF);
+        <td class='td-title'>
+	    <label>
+          	<input type="radio" checked name="when" value="1day">
+            	<b>Daily&nbsp;</b>
+	    </label>
+        </td>
+        <td class='td-title'>
+       	    <label>
+          	<input type="radio" name="when" value="1week">
+            	<b>Weekly&nbsp;</b>
+	    </label>
+        </td>
+        <td class='td-title'>
+       	    <label>
+          	<input type="radio" name="when" value="1month">
+            	<b>Monthly&nbsp;</b>
+	    </label>
+        </td>
+        <td class='td-title'>
+       	    <label>
+          	<input type="radio" name="when" value="1year">
+            	<b>Yearly&nbsp;</b>
+	    </label>
+        </td>
+      </tr>
+EOF
+
+	if($config{max_historic_years} > 1) {
+		print(OUT "      <tr>\n");
+	}
+	for($n = 2; $n <= $config{max_historic_years}; $n++) {
+		if($n > 2 && (($n - 2) % 4) == 0) {
+			print(OUT "      </tr>\n");
+			print(OUT "      <tr>\n");
+		}
+		print(OUT <<EOF);
+        <td class='td-title'>
+       	    <label>
+          	<input type="radio" name="when" value="${n}year">
+            	<b>$n Years&nbsp;</b>
+	    </label>
+        </td>
+EOF
+	}
+	if($config{max_historic_years} > 1) {
+		print(OUT "      </tr>\n");
+	}
+
+	print(OUT <<EOF);
+    </table>
+    <p>
+    <input type="hidden" name="color" value="$theme">
+    <input type="submit" value="    Ok    ">
+  </form>
+  </center>
+ </body>
+</html>
+EOF
+	close(OUT);
+}
+
+
+# Main
+# ----------------------------------------------------------------------------
+getopts("c:p:d:vnu", \%options) || usage();
+
+if($options{v}) {
+	print("Monitorix version " . VERSION . " (" . RELDATE . ")\n");
+	print("by Jordi Sanfeliu <jordi\@fibranet.cat>\n");
+	print("https://www.monitorix.org/\n\n");
+	exit(0);
+}
+if(!$options{c}) {
+	usage();
+	exit(1);
+}
+$options{c} = (abs_path($options{c}) || $options{c}) unless $^V lt 5.6.2;
+if(!stat($options{c})) {
+	die "can't open file '$options{c}': $!";
+}
+
+# load main configuration file
+my $conf = new Config::General(
+	-ConfigFile => $options{c},
+);
+%config = $conf->getall;
+$config{debug} = ();
+$config{func_update} = ();
+
+# get the current OS and kernel version and check its support
+my $release;
+($config{os}, undef, $release) = uname();
+if(!($release =~ m/^(\d+)\.(\d+)/)) {
+        die "FATAL: unable to get the kernel version.";
+}
+$config{kernel} = "$1.$2";
+
+if(!grep {$_ eq $config{os}} @suppsys) {
+	die "FATAL: your operating system ($config{os}) is not supported.";
+}
+
+if(grep {$_ eq $config{os}} ("FreeBSD", "OpenBSD", "NetBSD")) {
+	$SIG{'CHLD'} = 'DEFAULT';
+}	
+
+$0 = sprintf("%s %s%s%s%s%s%s",
+	$^V lt 5.6.2 ? "monitorix" : abs_path($0),
+	$options{c} ? "-c $options{c}" : "",
+	$options{p} ? " -p $options{p}" : "",
+	$options{d} ? " -d $options{d}" : "",
+	$options{v} ? " -v" : "",
+	$options{n} ? " -n" : "",
+	$options{u} ? " -u" : "");
+
+daemonize() unless $options{n};
+logger("Starting Monitorix version " . VERSION . " (pid $$).");
+logger("Loaded main configuration file '$options{c}'.");
+
+# save the pidfile
+if($options{p}) {
+	$options{p} = abs_path($options{p});
+	open(OUT, "> $options{p}")
+		|| die "could not open '$options{p}' for writing: $!";
+	print(OUT "$$");
+	close(OUT);
+}
+
+# change to a safety directory
+unless(chdir("/tmp")) {
+	die "can't chdir to /tmp: $!";
+}
+
+if($options{d}) {
+	if($options{d} ne "none" && $options{d} ne "all") {
+		@{$config{debug}} = split(',', $options{d});
+		foreach my $t (@{$config{debug}}) {
+			if(!grep {trim($_) eq $t} (split(',', $config{graph_name} . ", traffacct, emailreports"))) {
+				die "Invalid debug key '$t'";
+			}
+		}
+	}
+	logger("Entering in debug mode.");
+	logger("Changed process name to '$0'.");
+}
+
+# load additional configuration files
+if($config{include_dir} && opendir(DIR, $config{include_dir})) {
+	my @files = grep { !/^[.]/ } readdir(DIR);
+	closedir(DIR);
+	foreach my $c (sort @files) {
+		next unless -f $config{include_dir} . "/$c";
+		next unless $c =~ m/\.conf$/;
+		logger("Loading extra configuration file '$config{include_dir}/$c'.");
+		my $conf_inc = new Config::General(
+			-ConfigFile => $config{include_dir} . "/$c",
+		);
+		my %config_inc = $conf_inc->getall;
+		while(my ($key, $val) = each(%config_inc)) {
+			if(ref($val) eq "HASH") {
+				# two level options (a subsection)
+				while(my ($key2, $val2) = each(%{$val})) {
+					# delete first this whole subsection
+					delete($config{$key}->{$key2});
+					if(ref($val2) eq "HASH") {
+						# three level options (a subsubsection)
+						while(my ($key3, $val3) = each(%{$val2})) {
+							$config{$key}->{$key2}->{$key3} = $val3;
+							delete $config_inc{$key}->{$key2}->{$key3};
+						}
+						next;
+					}
+					$config{$key}->{$key2} = $val2;
+					delete $config_inc{$key}->{$key2};
+				}
+				next;
+			}
+			# graph_name option is special
+			if($key eq "graph_name") {
+				$config{graph_name} .= ", $val";
+				delete $config_inc{graph_name};
+				next;
+			}
+			# one level options
+			$config{$key} = $val;
+			delete $config_inc{$key};
+		}
+	}
+} else {
+	logger("Can't read directory '$config{include_dir}'. $!")
+		if $config{include_dir};
+}
+
+# make sure that some options are correctly defined
+die "ERROR: 'base_dir' option does not exist.\n" if(!defined($config{base_dir}));
+die "ERROR: 'base_lib' option does not exist.\n" if(!defined($config{base_lib}));
+die "ERROR: 'base_url' option does not exist.\n" if(!defined($config{base_url}));
+die "ERROR: 'base_cgi' option does not exist.\n" if(!defined($config{base_cgi}));
+
+if(!$config{max_historic_years}) {
+	logger("WARNING: the 'max_historic_years' option doesn't exist. Please consider upgrading your configuration file.");
+	$config{max_historic_years} = 1;
+}
+if(!$config{net}->{max}) {
+	logger("WARNING: the 'max' option in 'net.pm' doesn't exist. Please consider upgrading your configuration file.");
+	$config{net}->{max} = 10;
+}
+if(!$config{global_zoom}) {
+	logger("WARNING: the 'global_zoom' option is not valid or doesn't exist. Please consider upgrading your configuration file.");
+	# it's set in 'monitorix.cgi'
+}
+if(!$config{image_format}) {
+	logger("WARNING: the 'image_format' option is not valid or doesn't exist. Please consider upgrading your configuration file.");
+	# it's set in 'monitorix.cgi'
+}
+if(!defined($config{logo_top_url})) {
+	logger("WARNING: the 'logo_top_url' option doesn't exist. Please consider upgrading your configuration file.");
+	$config{logo_top_url} = "https://www.monitorix.org/";
+}
+if(lc($config{httpd_builtin}->{enabled} || "") eq "y" && !$config{httpd_builtin}->{autocheck_responsiveness}) {
+	logger("WARNING: the 'autocheck_responsiveness' option is not valid or doesn't exist. Please consider upgrading your configuration file.");
+	$config{httpd_builtin}->{autocheck_responsiveness} = "y";
+}
+if(lc($config{multihost}->{enabled} || "") eq "y" && !$config{multihost}->{default_option_when_all}) {
+	logger("WARNING: the 'default_option_when_all' option is not valid or doesn't exist. Please consider upgrading your configuration file.");
+	$config{multihost}->{default_option_when_all} = "System load";
+}
+if(!$config{use_external_firewall}) {
+	$config{use_external_firewall} = "n";
+}
+
+# save the path of the configuration file
+if(open(OUT, "> " . $config{base_dir} . "/cgi/monitorix.conf.path")) {
+	print(OUT "$options{c}\n");
+	close(OUT);
+} else {
+	logger("WARNING: unable to create the file '$config{base_dir}/cgi/monitorix.conf.path'. $!");
+}
+
+if($config{os} eq "Linux" && !$config{u}) {
+	# make sure that 'ip_default_table' option has a consistent value
+	$config{ip_default_table} = "filter" if !$config{ip_default_table};
+
+	# check 'iptables' version to include the new wait lock option '--wait'
+	my $ipv = `iptables --version`;
+	chomp($ipv);
+	$ipv =~ s/^iptables v//;
+	$ipv = sprintf("%03s.%03s.%03s", split('\.', $ipv));
+	if($ipv gt "001.004.020") {       # 1.4.20
+		$config{iptables_wait_lock} = " --wait ";
+	} else {
+		$config{iptables_wait_lock} = "";
+	}
+}
+
+# make sure that there aren't residual Monitorix iptables rules
+flush_accounting_rules(\%config, $options{d}) unless $options{u};
+
+logger("Initializing graphs.");
+
+# check for inconsistencies between enabled graphs and defined graphs
+foreach my $g (sort keys %{$config{graph_enable}}) {
+	if(lc($config{graph_enable}->{$g} || "") eq "y") {
+		if(!grep {trim($_) eq $g} (split(',', $config{graph_name}))) {
+			logger("WARNING: inconsitency between '<graph_enable>' and 'graph_name' options; '$g' doesn't exist.");
+		}
+	}
+}
+
+# initialize all enabled graphs
+foreach (split(',', ($config{graph_name} || "") . ", traffacct")) {
+	my $g = trim($_);
+	my $e = "n";
+
+	if($g eq "traffacct") {
+		$e = lc($config{$g}->{enabled} || "");
+	} else {
+		$e = lc($config{graph_enable}->{$g} || "");
+	}
+
+	if($e eq "y") {
+		my $init = $g . "_init";
+		my $d = $g;
+
+		undef($d) if(!grep {trim($_) eq $d} (@{$config{debug}}));
+		if(defined($options{d}) && $options{d} eq "all") {
+			$d = $g;
+		}
+
+		eval "use $g qw(" . $init . " " . $g . "_update)";
+		if($@) {
+			logger("WARNING: unable to load module '$g'. $@");
+			next;
+		}
+		{
+			no strict "refs";
+			eval { &$init($g, \%config, $d); };
+		}
+		logger("WARNING: unexpected errors in function $init().") if($@);
+	}
+}
+
+if(!scalar($config{func_update})) {
+	logger("Nothing to do, exiting.");
+	exit(0);
+}
+
+logger("Generating the 'index.html' file.");
+create_index();
+
+# start the HTTP built-in (if enabled)
+if(lc($config{httpd_builtin}->{enabled} || "") eq "y") {
+	if(!$config{u}) {
+		logger("Setting owner/group and permission bits for the imgs/ directory.") if defined($options{d});
+		my (undef, undef, $uid) = getpwnam($config{httpd_builtin}->{user});
+		my (undef, undef, $gid) = getgrnam($config{httpd_builtin}->{group});
+		chown($uid, $gid, $config{base_dir} . "/" . $config{imgs_dir});
+		chmod(0755, $config{base_dir} . "/" . $config{imgs_dir});
+	}
+
+	require HTTPServer;
+	httpd_setup(\%config, $options{u});
+	logger("Started HTTP built-in server (pid $config{httpd_pid}).") if (defined($config{httpd_pid}));
+}
+
+setpriority(0, 0, $config{priority} || 0);
+logger("Ok, ready.");
+
+# main loop
+while(1) {
+
+	select undef, undef, undef, 1.0;
+
+	my ($sec, $min, $hour, $mday, $mon, undef, $wday) = localtime(time);
+
+	# call to all enabled graphs on every minute
+	if($sec == 0) {
+		foreach my $f (@{$config{func_update}}) {
+			my $update = $f . "_update";
+			my $d = $f;
+			logger("Calling $update()") unless !$options{d};
+
+			undef($d) if(!grep {trim($_) eq $d} (@{$config{debug}}));
+			if(defined($options{d}) && $options{d} eq "all") {
+				$d = $f;
+			}
+
+			{
+				no strict "refs";
+				eval { &$update($f, \%config, $d); };
+				if($@) {
+					logger("$update(): $@");
+				}
+			}
+		}
+
+		# TRAFFACCT graph daily reports
+		if(lc($config{traffacct}->{enabled} || "") eq "y") {
+			my $d = "traffacct";
+			undef($d) if(!grep {trim($_) eq $d} (@{$config{debug}}));
+
+			# at 00:00h
+			if($min == 0 && $hour == 0) {
+
+				# collect traffic accounting every day
+				eval { traffacct::traffacct_getcounters(\%config, $d); };
+				if($@) {
+					logger("traffacct::traffacct_getcounters(): $@");
+				}
+
+				# send reports every first day of a month
+				if(lc($config{traffacct}->{reports}->{enabled} || "") eq "y") {
+					if($mday == 1) {
+						eval { traffacct::traffacct_sendreports(\%config, $d); };
+						if($@) {
+							logger("traffacct::traffacct_sendreports(): $@");
+						}
+					}
+				}
+			}
+		}
+
+		# Email Reports
+		if(lc($config{emailreports}->{enabled} || "") eq "y") {
+			my $emailreports = $config{emailreports};
+			my $m = $emailreports->{minute} || 0;
+			my $h = $emailreports->{hour} || 0;
+			my $d = "emailreports";
+			undef($d) if(!grep {trim($_) eq $d} (@{$config{debug}}));
+
+			if($min == $m && $hour == $h) {
+
+				eval "use emailreports qw(emailreports_send)";
+				if($@) {
+					logger("WARNING: unable to load module 'emailreports'. $@");
+					next;
+				}
+
+				# daily
+				if(lc($emailreports->{daily}->{enabled} || "") eq "y") {
+					eval { emailreports::emailreports_send(\%config, "daily", "1day", $d); };
+					if($@) {
+						logger("emailreports::emailreports_send(): $@");
+					}
+				}
+
+				# weekly (send reports on every Monday)
+				if($wday == 1) {
+					if(lc($emailreports->{weekly}->{enabled} || "") eq "y") {
+						eval { emailreports::emailreports_send(\%config, "weekly", "1week", $d); };
+						if($@) {
+							logger("emailreports::emailreports_send(): $@");
+						}
+					}
+				}
+
+				# monthly (send reports every first day of each month)
+				if($mday == 1) {
+					if(lc($emailreports->{monthly}->{enabled} || "") eq "y") {
+						eval { emailreports::emailreports_send(\%config, "monthly", "1month", $d); };
+						if($@) {
+							logger("emailreports::emailreports_send(): $@");
+						}
+					}
+				}
+
+				# yearly (send reports every first day of each year)
+				if($mon == 0 && $mday == 1) {
+					if(lc($emailreports->{yearly}->{enabled} || "") eq "y") {
+						eval { emailreports::emailreports_send(\%config, "yearly", "1year", $d); };
+						if($@) {
+							logger("emailreports::emailreports_send(): $@");
+						}
+					}
+				}
+			}
+		}
+
+		# check if the HTTP built-in server is responsive
+		if(lc($config{httpd_builtin}->{enabled} || "") eq "y") {
+			if(lc($config{httpd_builtin}->{autocheck_responsiveness} || "") eq "y") {
+				use LWP::UserAgent;
+				my $pid = fork();
+				if(!$pid) {
+					my $host = $config{httpd_builtin}->{host} ? $config{httpd_builtin}->{host} : "localhost";
+					my $url = "http://" . $host . ":" . $config{httpd_builtin}->{port} . $config{base_url};
+					my $ua = LWP::UserAgent->new(timeout => 30);
+					my $response = $ua->request(HTTP::Request->new('GET', $url));
+					if(!$response->is_success) {
+						if($response->status_line ne "401 Access Denied") {
+							logger("WARNING: HTTP built-in server not responding at '$url'.");
+							exit(1);
+						}
+					}
+					exit(0);
+				}
+				waitpid($pid, 0);
+				# waitpid sets the child's status in $?
+				if($? != 0) {
+					# restart HTTP built-in server
+					if(defined($config{httpd_pid})) {
+						require HTTPServer;
+						kill(15, $config{httpd_pid});
+						kill(9, $config{httpd_pid});
+						httpd_setup(\%config, $options{u});
+						logger("Restarted HTTP built-in server (pid $config{httpd_pid}).") if defined($config{httpd_pid});
+					}
+				}
+			}
+		}
+	}
+	waitpid(-1, WNOHANG);
+}

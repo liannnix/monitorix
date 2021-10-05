@@ -1,0 +1,25 @@
+From d99c6dab11164c11051b076aefc88947dd5a2cfb Mon Sep 17 00:00:00 2001
+From: Andrey Limachko <liannnix@altlinux.org>
+Date: Tue, 5 Oct 2021 21:18:52 +0400
+Subject: [PATCH] Config fix HTTP server port
+
+---
+ monitorix/monitorix.conf | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/monitorix/monitorix.conf b/monitorix/monitorix.conf
+index b62440b..6eec079 100644
+--- monitorix.conf
++++ monitorix.conf
+@@ -29,7 +29,7 @@ base_cgi = /monitorix-cgi
+ <httpd_builtin>
+ 	enabled = y
+ 	host =
+-	port = 8080
++	port = 8181
+ 	user = nobody
+ 	group = nobody
+ 	log_file = /var/log/monitorix-httpd
+-- 
+2.25.4
+

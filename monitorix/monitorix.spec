@@ -9,6 +9,9 @@ Url: https://github.com/mikaku/Monitorix
 
 Source: %name-%version.tar.gz
 
+Patch1: %name-%version-alt-config-fix-HTTP-server-port.patch
+Patch2: %name-%version-alt-config-fix-PID-file-path-in-Systemd-service-file.patch
+
 BuildArch: noarch
 
 BuildRequires(pre): rpm-build-licenses
@@ -48,20 +51,26 @@ simplicity and small size may also be used on embedded devices as well.
 
 %prep
 %setup -n %name-%version
+%autopatch
 
 %install
 %make_install DOCDIR=%_defaultdocdir/%name-%version LIBDIR=%perl_vendor_archlib DESTDIR=%buildroot install-systemd-all
+mkdir -p %buildroot%_sysconfdir/%name/conf.d
+mkdir -p %buildroot%_runtimedir/%name
 
 %files
 %doc COPYING Changes README README.md README.nginx
 %doc docs/htpasswd.pl docs/monitorix-alert.sh docs/monitorix-apache.conf docs/monitorix-lighttpd.conf
 %config %_logrotatedir/%name
+%dir %_sysconfdir/%name
+%dir %_sysconfdir/%name/conf.d
 %config(noreplace) %_sysconfdir/%name/%name.conf
 %config(noreplace) %_sysconfdir/sysconfig/%name
-%_libexecdir/*
-%_localstatedir/*
+%_libexecdir/systemd/system/*
+%_localstatedir/monitorix/*
 %_bindir/*
-%perl_vendor_archlib
+%attr(755,nobody,nobody) %dir %_runtimedir/%name
+%perl_vendor_archlib/*
 %_mandir/*
 
 %changelog

@@ -1,0 +1,27 @@
+From 794857c730e2cdd0ee8d147e16597ff9635ca63b Mon Sep 17 00:00:00 2001
+From: Andrey Limachko <liannnix@altlinux.org>
+Date: Tue, 5 Oct 2021 21:36:39 +0400
+Subject: [PATCH] Config fix PID file path in Systemd service file
+
+---
+ monitorix/docs/monitorix.service | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/monitorix/docs/monitorix.service b/monitorix/docs/monitorix.service
+index f775bac..d183753 100644
+--- docs/monitorix.service
++++ docs/monitorix.service
+@@ -7,8 +7,8 @@ Requires=network-online.target
+ [Service]
+ Type=forking
+ EnvironmentFile=-/etc/sysconfig/monitorix
+-ExecStart=/usr/bin/monitorix -c /etc/monitorix/monitorix.conf -p /run/monitorix.pid $OPTIONS
+-PIDFile=/run/monitorix.pid
++ExecStart=/usr/bin/monitorix -c /etc/monitorix/monitorix.conf -p /run/monitorix/monitorix.pid $OPTIONS
++PIDFile=/run/monitorix/monitorix.pid
+ 
+ [Install]
+ WantedBy=multi-user.target
+-- 
+2.25.4
+

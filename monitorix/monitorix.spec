@@ -11,6 +11,8 @@ Source: %name-%version.tar.gz
 
 Patch1: %name-%version-alt-config-fix-HTTP-server-port.patch
 Patch2: %name-%version-alt-config-fix-PID-file-path-in-Systemd-service-file.patch
+Patch3: %name-%version-alt-config-fix-abs_path.patch
+Patch4: %name-%version-alt-config-fix-ports.patch
 
 BuildArch: noarch
 

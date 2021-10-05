@@ -1,0 +1,34 @@
+From 73df63a33576e0f5c41f2c48ac0f2bfd9d028ed1 Mon Sep 17 00:00:00 2001
+From: Andrey Limachko <liannnix@altlinux.org>
+Date: Wed, 6 Oct 2021 00:42:27 +0400
+Subject: [PATCH] Fix config
+
+---
+ monitorix/monitorix.conf | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/monitorix/monitorix.conf b/monitorix/monitorix.conf
+index 6eec079..0fcf990 100644
+--- monitorix.conf
++++ monitorix.conf
+@@ -870,7 +870,7 @@ secure_log_date_format = %b %e
+ 		enabled = n
+ 		language = en
+ 		default_mail = root@localhost
+-		url_prefix = http://localhost:8080
++		url_prefix = http://localhost:8181
+ 		smtp_hostname = localhost
+ 		from_address = noreply@example.com
+ 	</reports>
+@@ -904,7 +904,7 @@ secure_log_date_format = %b %e
+ # -----------------------------------------------------------------------------
+ <emailreports>
+ 	enabled = n
+-	url_prefix = http://localhost:8080
++	url_prefix = http://localhost:8181
+ 	smtp_hostname = localhost
+ 	from_address = noreply@example.com
+ 	hour = 0
+-- 
+2.25.4
+

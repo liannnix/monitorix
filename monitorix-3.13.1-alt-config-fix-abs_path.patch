@@ -1,0 +1,25 @@
+From b979b0729cb7ab536ed213b768b0b4dc4fff49bd Mon Sep 17 00:00:00 2001
+From: Andrey Limachko <liannnix@altlinux.org>
+Date: Wed, 6 Oct 2021 14:49:21 +0400
+Subject: [PATCH] Fix abs_path
+
+---
+ monitorix/monitorix | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/monitorix/monitorix b/monitorix/monitorix
+index 54ebdac..4367139 100755
+--- monitorix
++++ monitorix
+@@ -542,7 +542,7 @@ logger("Loaded main configuration file '$options{c}'.");
+ 
+ # save the pidfile
+ if($options{p}) {
+-	$options{p} = abs_path($options{p});
++	$options{p} = File::Spec->rel2abs($options{p});
+ 	open(OUT, "> $options{p}")
+ 		|| die "could not open '$options{p}' for writing: $!";
+ 	print(OUT "$$");
+-- 
+2.25.4
+

@@ -1,3 +1,5 @@
+%define _unpackaged_files_terminate_build 1
+
 Name: monitorix
 Version: 3.13.1
 Release: alt1

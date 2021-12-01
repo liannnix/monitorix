@@ -542,7 +542,7 @@ logger("Loaded main configuration file '$options{c}'.");
 
 # save the pidfile
 if($options{p}) {
-	$options{p} = abs_path($options{p});
+	$options{p} = File::Spec->rel2abs($options{p});
 	open(OUT, "> $options{p}")
 		|| die "could not open '$options{p}' for writing: $!";
 	print(OUT "$$");

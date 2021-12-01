@@ -66,10 +66,11 @@ mkdir -p %buildroot%_runtimedir/%name
 %config(noreplace) %_sysconfdir/sysconfig/%name
 %_libexecdir/systemd/system/*
 %_localstatedir/monitorix/*
-%_bindir/*
+%_bindir/monitorix
 %attr(755,nobody,nobody) %dir %_runtimedir/%name
 %perl_vendor_archlib/*
-%_mandir/*
+%_man5dir/monitorix.conf.5.xz
+%_man8dir/monitorix.8.xz
 
 %changelog
 * Wed Dec 01 2021 Andrey Limachko <liannnix@altlinux.org> 3.13.1-alt1

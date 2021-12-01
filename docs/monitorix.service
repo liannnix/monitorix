@@ -7,8 +7,8 @@ Requires=network-online.target
 [Service]
 Type=forking
 EnvironmentFile=-/etc/sysconfig/monitorix
-ExecStart=/usr/bin/monitorix -c /etc/monitorix/monitorix.conf -p /run/monitorix.pid $OPTIONS
-PIDFile=/run/monitorix.pid
+ExecStart=/usr/bin/monitorix -c /etc/monitorix/monitorix.conf -p /run/monitorix/monitorix.pid $OPTIONS
+PIDFile=/run/monitorix/monitorix.pid
 
 [Install]
 WantedBy=multi-user.target
